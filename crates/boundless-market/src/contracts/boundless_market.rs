@@ -602,74 +602,71 @@ where
         let mut call =
             self.instance.lockRequest(request.clone(), client_sig_bytes).from(self.caller);
 
-
         let start_time = chrono::Utc::now();
         tracing::info!(" -- GAS HESAPLANMADAN HEMEN ONCE : {} - ORDER ID : 0x{:x}", Self::format_time(start_time), request.id);
-        if let Some(gas) = priority_gas {
-            // Cache'den gas fee'leri al veya güncelle
-            let (max_fee_per_gas, max_priority_fee_per_gas) = {
-                let mut cache = self.gas_price_cache.lock().await;
 
-                // Cache 10 dakika (600 saniye) geçerliliği kontrol et
-                if cache.is_expired(Duration::from_secs(600)) {
-                    tracing::trace!("Gas price cache expired, updating...");
-                    cache.update(&self.provider).await.context("Failed to update gas price cache")?;
-                } else {
-                    tracing::trace!("---- USING CACHED GAS PRICE ------");
-                }
-                let gas_cache_time = chrono::Utc::now();
-                tracing::info!(" -- GAS CACHEDEN GELDI : {} - ORDER ID : 0x{:x}", Self::format_time(gas_cache_time), request.id);
-                cache.get()
-            };
+        // Cache'den gas fee'leri al - priority_gas varsa kullan
+        let (max_fee_per_gas, max_priority_fee_per_gas) = if let Some(gas) = priority_gas {
+            let mut cache = self.gas_price_cache.lock().await;
 
-            let last_max_fee_per_gas = max_fee_per_gas + gas as u128;
-            let last_max_priority_fee_per_gas = max_priority_fee_per_gas + gas as u128;
+            // Cache 10 dakika (600 saniye) geçerliliği kontrol et
+            if cache.is_expired(Duration::from_secs(600)) {
+                tracing::trace!("Gas price cache expired, updating...");
+                cache.update(&self.provider).await.context("Failed to update gas price cache")?;
+            } else {
+                tracing::trace!("---- USING CACHED GAS PRICE ------");
+            }
+            let gas_cache_time = chrono::Utc::now();
+            tracing::info!(" -- GAS CACHEDEN GELDI : {} - ORDER ID : 0x{:x}", Self::format_time(gas_cache_time), request.id);
 
+            let (base_max_fee, base_priority_fee) = cache.get();
+            let final_max_fee = base_max_fee + gas as u128;
+            let final_priority_fee = base_priority_fee + gas as u128;
 
-            tracing::trace!("Call icine koyulan max_fee_per_gas : {}", last_max_fee_per_gas);
-            tracing::trace!("Call icine koyulan max_fee_per_gas : {}", last_max_priority_fee_per_gas);
+            tracing::trace!("Cache'den alınan max_fee_per_gas : {}", final_max_fee);
+            tracing::trace!("Cache'den alınan max_priority_fee_per_gas : {}", final_priority_fee);
 
-            call = call
-                .max_fee_per_gas(last_max_fee_per_gas)
-                .max_priority_fee_per_gas(last_max_priority_fee_per_gas);
-        }
+            (final_max_fee, final_priority_fee)
+        } else {
+            // Default değerler - priority fee MUTLAKA > 0 olmalı!
+            tracing::trace!("Default gas değerleri kullanılıyor");
+            (20_000_000_000u128, 1_000_000_000u128) // 20 gwei max, 1 gwei priority
+        };
 
         let tx_send_start_time = chrono::Utc::now();
         tracing::info!(" -- TX ATIYORUM HAZIR OL : {} - ORDER ID : 0x{:x}", Self::format_time(tx_send_start_time), request.id);
         tracing::trace!("Sending tx {}", format!("{:?}", call));
-        // Custom RPC call yapacaksın:
-        // Signed raw transaction oluştur
-
 
         let wallet = EthereumWallet::from(signer.clone());
-
-
         let mut tx_request = call.into_transaction_request();
 
-        // Sadece nonce'u ekle
+        // Nonce'u al
         let nonce = self.provider
             .get_transaction_count(signer.address())
             .pending()
             .await
             .context("Failed to get nonce")?;
 
-        // Sabit gas_limit gas limit ekle
-
+        // Gas limit
         let gas_limit = lockin_gas_limit.unwrap_or(206515);
-            tracing::trace!("---------- gas_limit :::::::: {} ", gas_limit);
+        tracing::trace!("---------- gas_limit :::::::: {} ", gas_limit);
 
+        // Gas fee'leri tx_request'e set et (yukarıda cache'den alındı)
         tx_request = tx_request
             .with_nonce(nonce)
-            .with_gas_limit(gas_limit);
+            .with_gas_limit(gas_limit)
+            .with_max_fee_per_gas(max_fee_per_gas)
+            .with_max_priority_fee_per_gas(max_priority_fee_per_gas);
+
         let tx_envelope = tx_request.build(&wallet).await
             .context("Failed to build transaction")?;
         let tx_encoded = tx_envelope.encoded_2718();
 
         // QuickNode private RPC call
         let params = serde_json::json!([{
-            "tx": format!("0x{}", hex::encode(tx_encoded)),
-            "preferences": { "fast": true }
-        }]);
+        "tx": format!("0x{}", hex::encode(tx_encoded)),
+        "preferences": { "fast": true }
+    }]);
 
         let response: serde_json::Value = self.provider
             .raw_request("eth_sendPrivateTransaction".into(), Some(params))
@@ -681,106 +678,51 @@ where
 
         let tx_pending_start_time = chrono::Utc::now();
         tracing::info!(" -- TX ATILDI PENDING : {} - ORDER ID : 0x{:x}", Self::format_time(tx_pending_start_time), request.id);
-
         tracing::trace!("Broadcasting lock request tx {}", tx_hash);
 
         let tx_end_time = chrono::Utc::now();
         tracing::info!(" -- TX ATILDI BITTI : {} - ORDER ID : 0x{:x}", Self::format_time(tx_end_time), request.id);
 
-
-        // Merkle API ile status takibi
-        let status_url = format!("https://mempool.merkle.io/transaction/{}", tx_hash);
-        let client = reqwest::Client::new();
-        let mut attempts = 0;
-        let max_attempts = 60; // 60 saniye bekle
-
-        loop {
-            match client.get(&status_url).send().await {
-                Ok(response) if response.status().is_success() => {
-                    let status_data: serde_json::Value = response.json().await
-                        .context("Failed to parse status response")?;
-
-                    let status = status_data["status"].as_str().unwrap_or("unknown");
-                    let pending = status_data["pending"].as_bool().unwrap_or(true);
-
-                    tracing::info!("Private tx status: {}, pending: {} - ORDER ID : 0x{:x}",
-                             status, pending, request.id);
-
-                    match status {
-                        "mined" => {
-                            let block_number = status_data["mined_at_block_number"].as_u64()
-                                .context("Missing block number")?;
-
-                            let tx_end_time = chrono::Utc::now();
-                            tracing::info!(" -- TX MINED AT BLOCK {} : {} - ORDER ID : 0x{:x}",
-                                     block_number, Self::format_time(tx_end_time), request.id);
-
-                            // Transaction başarılı mı kontrol et (status field'dan)
-                            if let Some(tx_data) = status_data["transaction"].as_object() {
-                                // Eğer transaction revert olmuşsa burada kontrol edebilirsiniz
-                                tracing::info!("Transaction details: {:?}", tx_data);
-                            }
-
-                            return Ok(block_number);
-                        },
-                        "pending" => {
-                            // Devam et, bekle
-                        },
-                        "expired" | "nonce_too_low" | "underpriced" | "not_enough_funds" |
-                        "base_fee_low" | "low_priority_fee" | "not_enough_gas" | "sanctioned" |
-                        "gas_limit_too_high" | "invalid_signature" | "reverting" => {
-                            return Err(MarketError::Error(anyhow::anyhow!(
-                                    "Private transaction failed: {}", status
-                                )));
-                        },
-                        _ => {
-                            tracing::warn!("Unknown transaction status: {}", status);
-                        }
+        // Receipt bekle - İLK RECEIPT ALMA KISMINI KALDIRDIK
+        for i in 0..120 {
+            match self.provider.get_transaction_receipt(tx_hash).await {
+                Ok(Some(receipt)) => {
+                    if receipt.status() {
+                        let block_number = receipt.block_number.context("TXN Receipt missing block number")?;
+                        tracing::info!("✅ Private tx başarılı! Block: {} - ORDER ID: 0x{:x}",
+                         block_number, request.id);
+                        tracing::info!(
+                        "Locked request {:x}, transaction hash: {}",
+                        request.id,
+                        receipt.transaction_hash
+                    );
+                        return Ok(block_number);
+                    } else {
+                        // TX revert olmuş
+                        tracing::error!("❌ Private tx revert oldu - ORDER ID: 0x{:x}", request.id);
+                        return Err(MarketError::LockRevert(receipt.transaction_hash));
                     }
                 },
-                Ok(response) if response.status() == 404 => {
-                    tracing::trace!("Private transaction not found yet in Merkle pool...");
-                },
-                Ok(response) => {
-                    tracing::warn!("Unexpected Merkle API response: {}", response.status());
+                Ok(None) => {
+                    // Receipt henüz yok, devam et
+                    if i % 10 == 0 {
+                        tracing::trace!("Receipt bekleniyor... {}/120 - ORDER ID: 0x{:x}", i + 1, request.id);
+                    }
                 },
                 Err(e) => {
-                    tracing::warn!("Failed to check Merkle status: {}", e);
+                    tracing::warn!("Receipt alma hatası attempt {}: {} - ORDER ID: 0x{:x}", i + 1, e, request.id);
                 }
-            }
-
-            attempts += 1;
-            if attempts >= max_attempts {
-                // return Err(MarketError::Error(tx_hash));
-                return Err(MarketError::Error(anyhow::anyhow!(
-    "Private transaction timeout after {} seconds", max_attempts
-)));
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-
-        let receipt = self.provider.get_transaction_receipt(tx_hash).await
-            .context("Failed to get receipt")?
-            .ok_or_else(|| anyhow::anyhow!("Receipt not found"))?;
-
-        if !receipt.status() {
-            // TODO: Get + print revertReason
-            return Err(MarketError::LockRevert(receipt.transaction_hash));
-        }
-
-        tracing::info!(
-            "Locked request {:x}, transaction hash: {}",
-            request.id,
-            receipt.transaction_hash
-        );
-
-
-
-        Ok(receipt.block_number.context("TXN Receipt missing block number")?)
+        // 120 saniye sonra timeout
+        tracing::error!("⏰ Private tx 120 saniye sonra receipt bulunamadı - ORDER ID: 0x{:x}", request.id);
+            Err(MarketError::Error(anyhow::anyhow!(
+            "Private transaction receipt not found after 120 seconds: {}", tx_hash
+        )))
     }
-
 
     /// Lock the request to the prover, giving them exclusive rights to be paid to
     /// fulfill this request, and also making them subject to slashing penalties if they fail to

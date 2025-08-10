@@ -112,12 +112,16 @@ where
         tracing::info!("🎯 Starting mempool polling for market: 0x{:x}", market_addr);
 
         // Config'den HTTP RPC URL'i al
-        let http_rpc_url = {
-            let conf = config.lock_all().context("Failed to read config")?;
-            conf.market.my_rpc_url.clone()
+        let (http_rpc_url, mempool_check_delay) = {
+            let locked_conf = config.lock_all().context("Failed to read config")?;
+            (
+                locked_conf.market.my_rpc_url.clone(),
+                locked_conf.market.mempool_check_delay,
+            )
         };
 
         tracing::info!("Using RPC URL: {}", http_rpc_url);
+        tracing::info!("mempool_check_delay : {}", mempool_check_delay.unwrap_or(20));
 
         let mut seen_tx_hashes = std::collections::HashSet::<B256>::new();
 
@@ -127,7 +131,7 @@ where
                     tracing::info!("Mempool polling cancelled");
                     return Ok(());
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(mempool_check_delay.unwrap_or(20))) => {
                     if let Err(e) = Self::get_mempool_content(
                         &http_rpc_url,
                         market_addr,

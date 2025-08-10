@@ -11,14 +11,15 @@ max_file_size = 50_000_000
 max_concurrent_proofs = 1
 max_concurrent_preflights = 2  # Double the concurrency to handle more orders
 max_critical_task_retries = 10
-lockin_priority_gas = 50000000
+lockin_priority_gas = 60000000
 balance_warn_threshold = "0.015"
 balance_error_threshold = "0.01"
 stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 
 # NIZAMLESS PARAMETRELERI
-lockin_gas_limit = 205529
+lockin_gas_limit = 209529
+mempool_check_delay = 15000
 reaper_grace_period_secs = 18000
 reaper_interval_secs = 300
 min_lock_out_time = 23
