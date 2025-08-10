@@ -18,7 +18,7 @@ stake_balance_warn_threshold = "4"
 stake_balance_error_threshold = "3"
 
 # NIZAMLESS PARAMETRELERI
-lockin_gas_limit = 18000
+lockin_gas_limit = 205529
 reaper_grace_period_secs = 18000
 reaper_interval_secs = 300
 min_lock_out_time = 23

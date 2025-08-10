@@ -687,20 +687,6 @@ where
         let tx_end_time = chrono::Utc::now();
         tracing::info!(" -- TX ATILDI BITTI : {} - ORDER ID : 0x{:x}", Self::format_time(tx_end_time), request.id);
 
-        let receipt = self.provider.get_transaction_receipt(tx_hash).await
-            .context("Failed to get receipt")?
-            .ok_or_else(|| anyhow::anyhow!("Receipt not found"))?;
-
-        if !receipt.status() {
-            // TODO: Get + print revertReason
-            return Err(MarketError::LockRevert(receipt.transaction_hash));
-        }
-
-        tracing::info!(
-            "Locked request {:x}, transaction hash: {}",
-            request.id,
-            receipt.transaction_hash
-        );
 
         // Merkle API ile status takibi
         let status_url = format!("https://mempool.merkle.io/transaction/{}", tx_hash);
@@ -773,6 +759,24 @@ where
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+
+
+        let receipt = self.provider.get_transaction_receipt(tx_hash).await
+            .context("Failed to get receipt")?
+            .ok_or_else(|| anyhow::anyhow!("Receipt not found"))?;
+
+        if !receipt.status() {
+            // TODO: Get + print revertReason
+            return Err(MarketError::LockRevert(receipt.transaction_hash));
+        }
+
+        tracing::info!(
+            "Locked request {:x}, transaction hash: {}",
+            request.id,
+            receipt.transaction_hash
+        );
+
+
 
         Ok(receipt.block_number.context("TXN Receipt missing block number")?)
     }
