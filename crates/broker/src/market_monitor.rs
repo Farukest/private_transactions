@@ -357,6 +357,14 @@ where
             locked_conf.market.lockin_priority_gas
         };
 
+        let (lockin_gas_limit, lockin_priority_gas) = {
+            let locked_conf = config.lock_all().context("Failed to read config")?;
+            (
+                locked_conf.market.lockin_gas_limit,
+                locked_conf.market.lockin_priority_gas,
+            )
+        };
+
 
 
         // 🎯 TIMESTAMP'LERİ SET ET
@@ -377,7 +385,7 @@ where
 
         // new_order.image_id = Some(Self::normalize_hex_data(&decoded.requirements.imageId));
 
-        match boundless_service.lock_request_private(&decoded.request, decoded.clientSignature.clone(), lockin_priority_gas, signer).await {
+        match boundless_service.lock_request_private(&decoded.request, decoded.clientSignature.clone(), lockin_priority_gas, signer, lockin_gas_limit).await {
             Ok(lock_block) => {
                 tracing::info!("✅ Successfully locked request: 0x{:x} at block {}", request_id, lock_block);
 

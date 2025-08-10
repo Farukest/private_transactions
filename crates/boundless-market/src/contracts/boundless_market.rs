@@ -587,6 +587,7 @@ where
         client_sig: impl Into<Bytes>,
         priority_gas: Option<u64>,
         signer: PrivateKeySigner,
+        lockin_gas_limit: Option<u64>,
     ) -> Result<u64, MarketError> {
         // tracing::trace!("Calling requestIsLocked({:x})", request.id);
         let is_locked_in: bool =
@@ -652,15 +653,19 @@ where
             .await
             .context("Failed to get nonce")?;
 
-        // Sabit gas limit ekle
+        // Sabit gas_limit gas limit ekle
+
+        let gas_limit = lockin_gas_limit.unwrap_or(206515);
+            tracing::trace!("---------- gas_limit :::::::: {} ", gas_limit);
+
         tx_request = tx_request
             .with_nonce(nonce)
-            .with_gas_limit(206515);
+            .with_gas_limit(gas_limit);
         let tx_envelope = tx_request.build(&wallet).await
             .context("Failed to build transaction")?;
         let tx_encoded = tx_envelope.encoded_2718();
 
-                // QuickNode private RPC call
+        // QuickNode private RPC call
         let params = serde_json::json!([{
             "tx": format!("0x{}", hex::encode(tx_encoded)),
             "preferences": { "fast": true }
@@ -697,7 +702,77 @@ where
             receipt.transaction_hash
         );
 
-        // self.check_stake_balance().await?;
+        // Merkle API ile status takibi
+        let status_url = format!("https://mempool.merkle.io/transaction/{}", tx_hash);
+        let client = reqwest::Client::new();
+        let mut attempts = 0;
+        let max_attempts = 60; // 60 saniye bekle
+
+        loop {
+            match client.get(&status_url).send().await {
+                Ok(response) if response.status().is_success() => {
+                    let status_data: serde_json::Value = response.json().await
+                        .context("Failed to parse status response")?;
+
+                    let status = status_data["status"].as_str().unwrap_or("unknown");
+                    let pending = status_data["pending"].as_bool().unwrap_or(true);
+
+                    tracing::info!("Private tx status: {}, pending: {} - ORDER ID : 0x{:x}",
+                             status, pending, request.id);
+
+                    match status {
+                        "mined" => {
+                            let block_number = status_data["mined_at_block_number"].as_u64()
+                                .context("Missing block number")?;
+
+                            let tx_end_time = chrono::Utc::now();
+                            tracing::info!(" -- TX MINED AT BLOCK {} : {} - ORDER ID : 0x{:x}",
+                                     block_number, Self::format_time(tx_end_time), request.id);
+
+                            // Transaction başarılı mı kontrol et (status field'dan)
+                            if let Some(tx_data) = status_data["transaction"].as_object() {
+                                // Eğer transaction revert olmuşsa burada kontrol edebilirsiniz
+                                tracing::info!("Transaction details: {:?}", tx_data);
+                            }
+
+                            return Ok(block_number);
+                        },
+                        "pending" => {
+                            // Devam et, bekle
+                        },
+                        "expired" | "nonce_too_low" | "underpriced" | "not_enough_funds" |
+                        "base_fee_low" | "low_priority_fee" | "not_enough_gas" | "sanctioned" |
+                        "gas_limit_too_high" | "invalid_signature" | "reverting" => {
+                            return Err(MarketError::Error(anyhow::anyhow!(
+                                    "Private transaction failed: {}", status
+                                )));
+                        },
+                        _ => {
+                            tracing::warn!("Unknown transaction status: {}", status);
+                        }
+                    }
+                },
+                Ok(response) if response.status() == 404 => {
+                    tracing::trace!("Private transaction not found yet in Merkle pool...");
+                },
+                Ok(response) => {
+                    tracing::warn!("Unexpected Merkle API response: {}", response.status());
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to check Merkle status: {}", e);
+                }
+            }
+
+            attempts += 1;
+            if attempts >= max_attempts {
+                // return Err(MarketError::Error(tx_hash));
+                return Err(MarketError::Error(anyhow::anyhow!(
+    "Private transaction timeout after {} seconds", max_attempts
+)));
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
         Ok(receipt.block_number.context("TXN Receipt missing block number")?)
     }

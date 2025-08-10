@@ -180,6 +180,7 @@ pub struct MarketConf {
     /// for increasing the priority if competing with multiple provers during the
     /// same block
     pub lockin_priority_gas: Option<u64>,
+    pub lockin_gas_limit: Option<u64>,
     /// Max input / image file size allowed for downloading from request URLs.
     pub max_file_size: usize,
     /// Max retries for fetching input / image contents from URLs
@@ -283,6 +284,7 @@ impl Default for MarketConf {
             deny_requestor_addresses: None,
             allow_requestor_addresses: None,
             lockin_priority_gas: None,
+            lockin_gas_limit: None,
             max_file_size: 50_000_000,
             max_fetch_retries: Some(2),
             lockin_gas_estimate: defaults::lockin_gas_estimate(),
@@ -641,6 +643,7 @@ max_fetch_retries = 10
 allow_client_addresses = ["0x0000000000000000000000000000000000000000"]
 deny_requestor_addresses = ["0x0000000000000000000000000000000000000000"]
 lockin_priority_gas = 100
+lockin_gas_limit = 100
 max_mcycle_limit = 10
 
 [prover]
@@ -689,6 +692,7 @@ error = ?"#;
         assert_eq!(config.market.max_stake, "0.1");
         assert_eq!(config.market.max_file_size, 50_000_000);
         assert_eq!(config.market.lockin_priority_gas, None);
+        assert_eq!(config.market.lockin_gas_limit, None);
 
         assert_eq!(config.prover.status_poll_ms, 1000);
         assert_eq!(config.prover.status_poll_retry_count, 3);
@@ -756,6 +760,7 @@ error = ?"#;
                 Some([Address::ZERO].into_iter().collect())
             );
             assert_eq!(config.market.lockin_priority_gas, Some(100));
+            assert_eq!(config.market.lockin_gas_limit, Some(100));
             assert_eq!(config.market.max_fetch_retries, Some(10));
             assert_eq!(config.market.max_mcycle_limit, Some(10));
             assert_eq!(config.prover.status_poll_ms, 1000);
